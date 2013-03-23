@@ -1,12 +1,28 @@
-import re, textwrap, json, sys
-from collections import OrderedDict
-from Queue import *
-from pprint import pprint
-from lxml import etree
-from nltk.corpus import stopwords
+#!/usr/bin/env python
 
-width = 80
-content_url = 'http://www.projectaon.org/en/xhtml/lw/02fotw/'
+'''Convert Project Aon XML to gamebook.js JSON.'''
+
+# Future idioms.
+from __future__ import print_function
+
+# Standard library imports
+from collections import OrderedDict
+import json
+import os.path
+from pprint import pprint
+from Queue import Queue
+import re
+import sys
+import textwrap
+
+# Third-party library imports
+from lxml import etree
+import nltk.corpus
+
+# Line width for text wrapping in output.
+WIDTH = 80
+# URL for linking to images on the Project Aon website.
+CONTENT_URL = 'http://www.projectaon.org/en/xhtml/lw/'
 
 def processPara(para):
     para = re.sub('</?p/?>', '', para)
@@ -26,20 +42,68 @@ def processPara(para):
     para = re.sub('</?description>', '', para)
     para = re.sub('</?blockquote>', '', para)
     para = re.sub('</?bookref.*?>', '', para)
-    return textwrap.wrap(para, width)
+    return textwrap.wrap(para, WIDTH)
 
-sections = OrderedDict()
-custom = json.load(open('fotw_custom.json'))
-parser = etree.XMLParser(resolve_entities=False)
-tree = etree.parse('fotw.xml', parser=parser)
-root = tree.getroot()
+def convert(xml_filename, customisations_filename):
+    '''Convert a ProjectAon XML file to JSON.
 
-stopwords = set(stopwords.words('english'))
-for w in ['turn', 'wish', 'want', 'turning', 'rather', 'would', 'along', 'upon', 'another']:
-    stopwords.add(w)
+    Keyword arguments:
+        xml_filename -- The name of the XML file to convert.
+        customisations_filename -- A JSON file defining custom behaviour
+            for gamebook sections that need them.
+    Returns:
+        An iterable of JSON lines.
 
-for sect_elem in root.findall('.//section[@class="numbered"]')[1:]:
-#for sect_elem in root.findall('.//section[@id="sect%s"]' % 181):
+    '''
+    sections = OrderedDict()
+    with open(customisations_filename) as customisations_file:
+        customisations = json.load(customisations_file)
+    parser = etree.XMLParser(resolve_entities=False)
+    tree = etree.parse(xml_filename, parser=parser)
+    root = tree.getroot()
+
+    stopwords = set(nltk.corpus.stopwords.words('english'))
+    stopwords.update(['turn', 'wish', 'want', 'turning', 'rather', 'would',
+                      'along', 'upon', 'another'])
+
+    for sect_elem in root.findall('.//section[@class="numbered"]')[1:]:
+    #for sect_elem in root.findall('.//section[@id="sect%s"]' % 181):
+        process_section(sect_elem, sections)
+
+    section_od = OrderedDict()
+    for sect_id in range(1, 351):
+        sect_id = str(sect_id)
+        section_od[sect_id] = sections[sect_id]
+
+    # q = Queue()
+    # visited = set()
+    # q.put('1')
+    # section_od = OrderedDict()
+    # to_set = []
+    # while not q.empty():
+    #     sect_id = q.get()
+    #     to_set.append(sect_id)
+    #     section_od[sect_id] = sections[sect_id]
+    # #    if sect_id == '197': continue
+    #     for choice in sections[sect_id]['choices']:
+    #         if choice['section'] not in visited:
+    #             q.put(choice['section'])
+    #             visited.add(choice['section'])
+
+    result_od = OrderedDict()
+    setup_od = OrderedDict()
+    for f in ['sequence', 'disciplines', 'weapons', 'equipment']:
+        setup_od[f] = customisations['setup'][f]
+    customisations['setup'] = setup_od
+    for f in ['prompt', 'intro_sequence', 'setup', 'synonyms']:
+        result_od[f] = customisations[f]
+    result_od['sections'] = section_od
+    #json.dump(result_od, open('fotw_generated.json', 'w'), indent=4)
+    open('fotw.json', 'w').write('\n'.join([line.rstrip() for line in json.dumps(result_od, indent=4).split('\n')]))
+
+    print 'produced %d sections' % len(result_od['sections'])
+
+def process_section(sect_elem, sections):
     sect_id = sect_elem.find('.//title').text
     sect_paras = []
     choices = []
@@ -85,7 +149,7 @@ for sect_elem in root.findall('.//section[@class="numbered"]')[1:]:
             sect_paras.append(processPara(s))
         if item.tag == 'signpost':
             s = processPara(s)[0]
-            spacer = ' ' * ((width - len(s)) / 2)
+            spacer = ' ' * ((WIDTH - len(s)) / 2)
             sect_paras.append([spacer + s])
         if item.tag == 'ul':
             for li in item:
@@ -172,8 +236,8 @@ for sect_elem in root.findall('.//section[@class="numbered"]')[1:]:
     if must_eat: section['must_eat'] = True
 
     # merge custom content
-    if sect_id in custom['sections']:
-        cust_sect = custom['sections'][sect_id]
+    if sect_id in customisations['sections']:
+        cust_sect = customisations['sections'][sect_id]
         if 'alternate_choices' in cust_sect:
             section['alternate_choices'] = True
         # if 'chain_choices' in cust_sect:
@@ -204,11 +268,11 @@ for sect_elem in root.findall('.//section[@class="numbered"]')[1:]:
         if 'reduce_choices' in cust_sect:
             section['reduce_choices'] = True
         cc_sections = []
-        for custom_choice in custom['sections'][sect_id].get('choices', []):
+        for custom_choice in customisations['sections'][sect_id].get('choices', []):
             if custom_choice['section'] in cc_sections:
                 exit('Error in custom section %s: duplicate choice sections' % sect_id)
             cc_sections.append(custom_choice['section'])
-        for custom_choice in custom['sections'][sect_id].get('choices', []):
+        for custom_choice in customisations['sections'][sect_id].get('choices', []):
             # no key to match here, so we got to match using choice.section (thus the need to search)
             #print custom_choice['section']
             found = False
@@ -246,38 +310,23 @@ for sect_elem in root.findall('.//section[@class="numbered"]')[1:]:
     #     report.append('must eat')
     if list_found:
         report.append('list')
-    if report and sect_id not in custom['sections']: #True:
+    if report and sect_id not in customisations['sections']: #True:
         print '%s: %s' % (sect_id, ', '.join(report))
 
-section_od = OrderedDict()
-for sect_id in range(1, 351):
-    sect_id = str(sect_id)
-    section_od[sect_id] = sections[sect_id]
+if __name__ == '__main__':
+    # Get book ID from command line.
+    book_id = '02fotw' # TODO
 
-# q = Queue()
-# visited = set()
-# q.put('1')
-# section_od = OrderedDict()
-# to_set = []
-# while not q.empty():
-#     sect_id = q.get()
-#     to_set.append(sect_id)
-#     section_od[sect_id] = sections[sect_id]
-# #    if sect_id == '197': continue
-#     for choice in sections[sect_id]['choices']:
-#         if choice['section'] not in visited:
-#             q.put(choice['section'])
-#             visited.add(choice['section'])
+    # Update the content URL.
+    global CONTENT_URL
+    CONTENT_URL += book_id + '/'
 
-result_od = OrderedDict()
-setup_od = OrderedDict()
-for f in ['sequence', 'disciplines', 'weapons', 'equipment']:
-    setup_od[f] = custom['setup'][f]
-custom['setup'] = setup_od
-for f in ['prompt', 'intro_sequence', 'setup', 'synonyms']:
-    result_od[f] = custom[f]
-result_od['sections'] = section_od
-#json.dump(result_od, open('fotw_generated.json', 'w'), indent=4)
-open('fotw.json', 'w').write('\n'.join([line.rstrip() for line in json.dumps(result_od, indent=4).split('\n')]))
+    # Get the appropriate filenames.
+    xml_filename = book_id + '.xml'
+    json_filename = book_id + '.json'
+    customisations_filename = book_id + '_custom.json'
 
-print 'produced %d sections' % len(result_od['sections'])
+    # Do the conversion.
+    with open(json_filename, 'w') as outfile:
+        for line in convert(xml_filename, customisations_filename):
+            print(line, out=outfile)
